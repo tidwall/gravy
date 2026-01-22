@@ -447,10 +447,14 @@ func (m *Map[T]) Begin(rects ...[4]float64) *Tx[T] {
 	return tx
 }
 
-func (tx *Tx[T]) End() {
+func (tx *Tx[T]) End() error {
+	if tx.ended {
+		return ErrTxEnded
+	}
 	tx.m.oob.unlock(bounds, tx)
 	tx.m.root.unlock(bounds, tx)
 	tx.ended = true
+	return nil
 }
 
 func (tx *Tx[T]) validate(rect rect) error {
