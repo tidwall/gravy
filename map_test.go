@@ -1,6 +1,6 @@
 // https://github.com/tidwall/gravy
 //
-// Copyright 2025 Joshua J Baker. All rights reserved.
+// Copyright 2026 Joshua J Baker. All rights reserved.
 package gravy
 
 import (
@@ -152,6 +152,8 @@ func TestExample1(t *testing.T) {
 	tx.Delete(phx, "Phoenix")
 	tx.End()
 
+	// Output:
+	// Phoenix
 }
 
 func TestExample2(t *testing.T) {
@@ -185,7 +187,7 @@ func TestExample2(t *testing.T) {
 	tx.Delete(her, "Hermosillo")
 	tx.End()
 
-	// Ouput:
+	// Output:
 	// Phoenix
 	// Hermosillo
 }

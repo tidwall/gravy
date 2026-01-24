@@ -1,6 +1,6 @@
 // https://github.com/tidwall/gravy
 //
-// Copyright 2025 Joshua J Baker. All rights reserved.
+// Copyright 2026 Joshua J Baker. All rights reserved.
 package gravy
 
 import (

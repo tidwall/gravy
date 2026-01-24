@@ -4,11 +4,11 @@ Vertically scalable spatial map for rapidly changing location data.
 
 - Designed for high concurrency and low contention
 - Uses a 2PL type locking mechanism
-- Works with rectangles, similar to an rtree. 
-- Uses a quadtree type structure under the hood.
-- The `Search` operation may return duplicates.
-- The input rectangle for the `Insert`, `Search` and `Delete` operations must be covered by the previous `Begin`, otherwise returns `ErrNotCovered`.
-- A transaction may cover multiple rectangles by calling `Begin(rect1, rect2, rect3, ...)`.
+- Works with rectangles, similar to an rtree
+- Uses a quadtree type structure under the hood
+- The `Search` operation may return duplicates
+- The input rectangle for the `Insert`, `Search` and `Delete` operations must be covered by the previous `Begin`, otherwise returns `ErrNotCovered`
+- A transaction may cover multiple rectangles by calling `Begin(rect1, rect2, rect3, ...)`
 
 ## Example
 
@@ -39,7 +39,7 @@ tx = m.Begin(phx)
 tx.Delete(phx, "Phoenix")
 tx.End()
 
-// Ouput:
+// Output:
 // Phoenix
 ```
 
@@ -76,7 +76,7 @@ tx.Delete(pra, "Prague")
 tx.Delete(her, "Hermosillo")
 tx.End()
 
-// Ouput:
+// Output:
 // Phoenix
 // Hermosillo
 ```
