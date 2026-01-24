@@ -176,6 +176,9 @@ func (n *oobNode[T]) search(bounds rect, rect rect,
 		}
 	}
 	for _, item := range n.items {
+		if !rectIntersects(rect, item.rect) {
+			continue
+		}
 		r := [4]float64{
 			item.rect.min.x, item.rect.min.y,
 			item.rect.max.x, item.rect.max.y,
@@ -421,14 +424,15 @@ func (b *branchNode[T]) search(bounds, rect rect,
 				continue
 			}
 			for _, item := range leaf.items {
-				if rectIntersects(item.rect, rect) {
-					r := [4]float64{
-						item.rect.min.x, item.rect.min.y,
-						item.rect.max.x, item.rect.max.y,
-					}
-					if !iter(r, item.data) {
-						return false
-					}
+				if !rectIntersects(item.rect, rect) {
+					continue
+				}
+				r := [4]float64{
+					item.rect.min.x, item.rect.min.y,
+					item.rect.max.x, item.rect.max.y,
+				}
+				if !iter(r, item.data) {
+					return false
 				}
 			}
 		}
