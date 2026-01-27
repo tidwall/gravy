@@ -5,6 +5,7 @@ package gravy
 
 import (
 	"errors"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"unsafe"
@@ -20,9 +21,13 @@ var (
 )
 
 const (
+	// first 2 bits are the node kind
 	kindLeaf      = 0
 	kindBranch    = 1
 	kindLeafSplit = 2
+	// copy on write flags
+	kindCloned       = 8  // bit 3
+	kindClonedLocked = 16 // bit 4
 )
 
 type point struct {
@@ -190,6 +195,45 @@ func (n *oobNode[T]) search(bounds rect, rect rect,
 	return true
 }
 
+func (b *branchNode[T]) cow(i int) {
+	// clone bit flag set
+	kind := b.states[i].kind.Load()
+	if kind < 4 {
+		return
+	}
+	if kind&kindClonedLocked == kindClonedLocked {
+		// Already in the process of being cloned
+		return
+	}
+	if validateState {
+		if kind&kindCloned != kindCloned {
+			panic("invalid state")
+		}
+	}
+	if !b.states[i].kind.CompareAndSwap(kind, kind|kindClonedLocked) {
+		return
+	}
+	kind = kind & 3
+	if kind == kindBranch {
+		b1 := (*branchNode[T])(b.nodes[i])
+		b2 := new(branchNode[T])
+		b.nodes[i] = unsafe.Pointer(b2)
+		for i := range b1.nodes {
+			kind := b1.states[i].kind.Load()
+			b2.states[i].kind.Store(kind | kindCloned)
+			b2.nodes[i] = b1.nodes[i]
+		}
+	} else {
+		l1 := (*leafNode[T])(b.nodes[i])
+		if l1 != nil {
+			l2 := new(leafNode[T])
+			l2.items = append(l2.items, l1.items...)
+			b.nodes[i] = unsafe.Pointer(l2)
+		}
+	}
+	b.states[i].kind.Store(kind)
+}
+
 func (b *branchNode[T]) lock(bounds rect, tx *Tx[T]) {
 	quads := calcQuads(bounds)
 	for i := range 4 {
@@ -205,6 +249,11 @@ func (b *branchNode[T]) lock(bounds rect, tx *Tx[T]) {
 		}
 		for {
 			kind := b.states[i].kind.Load()
+			if kind >= 4 {
+				b.cow(int(i))
+				runtime.Gosched()
+				continue
+			}
 			if kind == kindBranch {
 				(*branchNode[T])(b.nodes[i]).lock(quads[i], tx)
 				break
@@ -509,4 +558,73 @@ func (tx *Tx[T]) Search(rect [4]float64,
 		tx.m.root.search(bounds, r, iter, tx)
 	}
 	return nil
+}
+
+// Clone of the map.
+// This is an O(1) Copy-on-write.
+// WARNING: This operation requires exclusive access to the map. Do not call
+// while other transactions are sharing the same map.
+// It's your responsibility to manage access using a lock, such as with a
+// sync.RWLock.
+func (m *Map[T]) Clone() *Map[T] {
+	m2 := new(Map[T])
+	for i := range m.root.nodes {
+		kind := m.root.states[i].kind.Load()
+		m.root.states[i].kind.Store(kind | kindCloned)
+		m2.root.states[i].kind.Store(kind | kindCloned)
+		m2.root.nodes[i] = m.root.nodes[i]
+	}
+	if len(m.oob.items) > 0 {
+		m2.oob.items = append(m2.oob.items, m.oob.items...)
+	}
+	return m2
+}
+
+func (b *branchNode[T]) scan(iter func(rect [4]float64, data T) bool) bool {
+	for i := range b.nodes {
+		kind := b.states[i].kind.Load() & 3
+		if kind == kindBranch {
+			if !(*branchNode[T])(b.nodes[i]).scan(iter) {
+				return false
+			}
+		} else {
+			if validateState {
+				if kind != kindLeaf {
+					panic("invalid state")
+				}
+			}
+			leaf := (*leafNode[T])(b.nodes[i])
+			if leaf != nil {
+				for _, item := range leaf.items {
+					r := [4]float64{
+						item.rect.min.x, item.rect.min.y,
+						item.rect.max.x, item.rect.max.y,
+					}
+					if !iter(r, item.data) {
+						return false
+					}
+				}
+			}
+		}
+	}
+	return true
+}
+
+// Scan the map, iterating over all keys and values.
+// WARNING: This operation requires exclusive access to the map. Do not call
+// while other transactions are sharing the same map.
+// It's your responsibility to manage access using a lock, such as with a
+// sync.RWLock.
+func (m *Map[T]) Scan(iter func(rect [4]float64, data T) bool) {
+	if m.root.scan(iter) {
+		for _, item := range m.oob.items {
+			r := [4]float64{
+				item.rect.min.x, item.rect.min.y,
+				item.rect.max.x, item.rect.max.y,
+			}
+			if !iter(r, item.data) {
+				break
+			}
+		}
+	}
 }
