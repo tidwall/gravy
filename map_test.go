@@ -46,6 +46,7 @@ func TestSpatial(t *testing.T) {
 	}
 	geoms := make([]*geom, N)
 	var spatial Map[*geom]
+	spatial.validate = true
 	lotsa.Output = os.Stdout
 	print("insert ")
 	lotsa.Ops(N, T, func(i, t int) {
@@ -192,11 +193,11 @@ func TestExample2(t *testing.T) {
 	// Hermosillo
 }
 
-func (b *branchNode[T]) sane(depth int) {
+func (b *branchNode[T]) sane(depth int, validate bool) {
 	for i := range 4 {
 		kind := b.states[i].kind.Load()
-		if validateState {
-			if b.states[i].tx != nil {
+		if validate {
+			if b.states[i].txid != 0 {
 				panic("invalid state")
 			}
 			if !b.states[i].lock.TryLock() {
@@ -207,7 +208,7 @@ func (b *branchNode[T]) sane(depth int) {
 		switch kind {
 		case kindBranch:
 			branch := (*branchNode[T])(b.nodes[i])
-			branch.sane(depth + 1)
+			branch.sane(depth+1, validate)
 		case kindLeaf:
 			leaf := (*leafNode[T])(b.nodes[i])
 			if leaf != nil {
@@ -221,8 +222,8 @@ func (b *branchNode[T]) sane(depth int) {
 	}
 }
 
-func (s *Map[T]) Sane() {
-	s.root.sane(0)
+func (m *Map[T]) Sane() {
+	m.root.sane(0, m.validate)
 }
 
 func (b *branchNode[T]) count() int {
