@@ -1,5 +1,7 @@
 # gravy
 
+[![GoDoc](https://godoc.org/github.com/tidwall/gravy?status.svg)](https://godoc.org/github.com/tidwall/gravy)
+
 Vertically scalable spatial map for rapidly changing location data.
 
 - Designed for high concurrency and low contention
@@ -23,20 +25,20 @@ var m gravy.Map[string]
 phx := [4]float64{-112.073, 33.448, -112.073, 33.448}
 
 // Store location of Phoenix
-tx := m.Begin(phx)
+tx := m.Begin(true, phx)
 tx.Insert(phx, "Phoenix")
 tx.End()
 
 // Search for items intersecting Phoenix
 tx = m.Begin(phx)
-tx.Search(phx, func(rect [4]float64, city string) bool {
+tx.Search(false, phx, func(rect [4]float64, city string) bool {
     println(city)
     return true
 })
 tx.End()
 
 // Delete Phoenix
-tx = m.Begin(phx)
+tx = m.Begin(true, phx)
 tx.Delete(phx, "Phoenix")
 tx.End()
 
@@ -55,7 +57,7 @@ pra := [4]float64{14.420, 50.088, 14.420, 50.088}
 her := [4]float64{-110.977, 29.102, -110.977, 29.102}
 
 // Store locations
-tx := m.Begin(phx, pra, her)
+tx := m.Begin(true, phx, pra, her)
 tx.Insert(phx, "Phoenix")
 tx.Insert(pra, "Prague")
 tx.Insert(her, "Hermosillo")
@@ -63,7 +65,7 @@ tx.End()
 
 // Search for items intersecting a rectangle (sw-US nw-MX)
 rect := [4]float64{-120, 28, -110, 36}
-tx = m.Begin(rect)
+tx = m.Begin(false, rect)
 tx.Search(rect, func(rect [4]float64, city string) bool {
     println(city)
     return true
@@ -71,7 +73,7 @@ tx.Search(rect, func(rect [4]float64, city string) bool {
 tx.End()
 
 // Delete location
-tx = m.Begin(phx, pra, her)
+tx = m.Begin(true, phx, pra, her)
 tx.Delete(phx, "Phoenix")
 tx.Delete(pra, "Prague")
 tx.Delete(her, "Hermosillo")

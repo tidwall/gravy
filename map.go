@@ -15,8 +15,9 @@ const maxItems = 64
 const maxDepth = 32
 
 var (
-	ErrNotCovered = errors.New("rectangle not covered")
-	ErrTxEnded    = errors.New("transaction ended")
+	ErrNotCovered  = errors.New("rectangle not covered")
+	ErrTxEnded     = errors.New("transaction ended")
+	ErrNotWritable = errors.New("not writable")
 )
 
 const (
@@ -40,18 +41,31 @@ type rect struct {
 var bounds = rect{point{-180, -90}, point{180, 90}}
 
 type Tx[T comparable] struct {
-	id          uint64
-	withonerect bool
-	onerect     rect
-	m           *Map[T]
-	ended       bool
-	rects0      []rect
+	ended bool
+	write bool
+	m     *Map[T]
+	rects []rect
 }
 
 type state[T comparable] struct {
-	kind atomic.Int32
-	txid uint64
-	lock sync.Mutex
+	kind  atomic.Int32
+	mutex sync.RWMutex
+}
+
+func (s *state[T]) unlock(write bool) {
+	if write {
+		s.mutex.Unlock()
+	} else {
+		s.mutex.RUnlock()
+	}
+}
+
+func (s *state[T]) lock(write bool) {
+	if write {
+		s.mutex.Lock()
+	} else {
+		s.mutex.RLock()
+	}
 }
 
 type branchNode[T comparable] struct {
@@ -69,15 +83,13 @@ type leafNode[T comparable] struct {
 }
 
 type oobNode[T comparable] struct {
-	txid  uint64
-	mutex sync.Mutex
+	mutex sync.RWMutex
 	items []item[T]
 }
 
 type Map[T comparable] struct {
-	validate bool
-	root     branchNode[T]
-	oob      oobNode[T] // out of bounds items
+	root branchNode[T]
+	oob  oobNode[T] // out of bounds items
 }
 
 func rectContains(a, b rect) bool {
@@ -110,66 +122,44 @@ func calcQuads(r rect) [4]rect {
 	}
 }
 
-func (n *oobNode[T]) lock(bounds rect, tx *Tx[T], validate bool) {
+func (n *oobNode[T]) lock(bounds rect, tx *Tx[T]) {
 	var ok bool
-	if tx.withonerect {
-		if !rectContains(bounds, tx.onerect) {
+	for i := range tx.rects {
+		if !rectContains(bounds, tx.rects[i]) {
 			ok = true
-		}
-	} else {
-		for i := range tx.rects0 {
-			if !rectContains(bounds, tx.rects0[i]) {
-				ok = true
-				break
-			}
+			break
 		}
 	}
 	if ok {
-		n.mutex.Lock()
-		if validate {
-			if tx.m.oob.txid != 0 {
-				panic("invalid state")
-			}
-			tx.m.oob.txid = tx.id
+		if tx.write {
+			n.mutex.Lock()
+		} else {
+			n.mutex.RLock()
+		}
+
+	}
+}
+
+func (n *oobNode[T]) unlock(bounds rect, tx *Tx[T]) {
+	var ok bool
+	for i := range tx.rects {
+		if !rectContains(bounds, tx.rects[i]) {
+			ok = true
+			break
+		}
+	}
+	if ok {
+		if tx.write {
+			n.mutex.Unlock()
+		} else {
+			n.mutex.RUnlock()
 		}
 	}
 }
 
-func (n *oobNode[T]) unlock(bounds rect, tx *Tx[T], validate bool) {
-	var ok bool
-	if tx.withonerect {
-		if !rectContains(bounds, tx.onerect) {
-			ok = true
-		}
-	} else {
-		for i := range tx.rects0 {
-			if !rectContains(bounds, tx.rects0[i]) {
-				ok = true
-				break
-			}
-		}
-	}
-	if ok {
-		if validate {
-			if tx.m.oob.txid != tx.id {
-				panic("invalid state")
-			}
-			tx.m.oob.txid = 0
-		}
-		n.mutex.Unlock()
-	}
-}
-
-func (n *oobNode[T]) delete(bounds rect, item item[T], txid uint64,
-	validate bool,
-) {
+func (n *oobNode[T]) delete(bounds rect, item item[T]) {
 	if rectContains(bounds, item.rect) {
 		return
-	}
-	if validate {
-		if n.mutex.TryLock() || n.txid != txid {
-			panic("invalid state")
-		}
 	}
 	for i := range len(n.items) {
 		if n.items[i].data == item.data {
@@ -182,30 +172,18 @@ func (n *oobNode[T]) delete(bounds rect, item item[T], txid uint64,
 	}
 }
 
-func (n *oobNode[T]) insert(bounds rect, item item[T], txid uint64,
-	validate bool,
-) {
+func (n *oobNode[T]) insert(bounds rect, item item[T]) {
 	if rectContains(bounds, item.rect) {
 		return
-	}
-	if validate {
-		if n.mutex.TryLock() || n.txid != txid {
-			panic("invalid state")
-		}
 	}
 	n.items = append(n.items, item)
 }
 
 func (n *oobNode[T]) search(bounds rect, rect rect,
-	iter func(rect [4]float64, data T) bool, txid uint64, validate bool,
+	iter func(rect [4]float64, data T) bool,
 ) bool {
 	if rectContains(bounds, rect) {
 		return true
-	}
-	if validate {
-		if n.mutex.TryLock() || n.txid != txid {
-			panic("invalid state")
-		}
 	}
 	for _, item := range n.items {
 		if !rectIntersects(rect, item.rect) {
@@ -222,7 +200,7 @@ func (n *oobNode[T]) search(bounds rect, rect rect,
 	return true
 }
 
-func (b *branchNode[T]) cow(i int, validate bool) {
+func (b *branchNode[T]) cow(i int) {
 	// clone bit flag set
 	kind := b.states[i].kind.Load()
 	if kind < 4 {
@@ -231,11 +209,6 @@ func (b *branchNode[T]) cow(i int, validate bool) {
 	if kind&kindClonedLocked == kindClonedLocked {
 		// Already in the process of being cloned
 		return
-	}
-	if validate {
-		if kind&kindCloned != kindCloned {
-			panic("invalid state")
-		}
 	}
 	if !b.states[i].kind.CompareAndSwap(kind, kind|kindClonedLocked) {
 		return
@@ -261,20 +234,14 @@ func (b *branchNode[T]) cow(i int, validate bool) {
 	b.states[i].kind.Store(kind)
 }
 
-func (b *branchNode[T]) lock(bounds rect, tx *Tx[T], validate bool) {
+func (b *branchNode[T]) lock(bounds rect, tx *Tx[T]) {
 	quads := calcQuads(bounds)
 	for i := range 4 {
 		var ok bool
-		if tx.withonerect {
-			if rectIntersects(tx.onerect, quads[i]) {
+		for j := range tx.rects {
+			if rectIntersects(tx.rects[j], quads[i]) {
 				ok = true
-			}
-		} else {
-			for j := range tx.rects0 {
-				if rectIntersects(tx.rects0[j], quads[i]) {
-					ok = true
-					break
-				}
+				break
 			}
 		}
 		if !ok {
@@ -283,49 +250,32 @@ func (b *branchNode[T]) lock(bounds rect, tx *Tx[T], validate bool) {
 		for {
 			kind := b.states[i].kind.Load()
 			if kind >= 4 {
-				b.cow(int(i), validate)
+				b.cow(int(i))
 				runtime.Gosched()
 				continue
 			}
 			if kind == kindBranch {
-				(*branchNode[T])(b.nodes[i]).lock(quads[i], tx, validate)
+				(*branchNode[T])(b.nodes[i]).lock(quads[i], tx)
 				break
 			}
-			b.states[i].lock.Lock()
+			b.states[i].lock(tx.write)
 			kind = b.states[i].kind.Load()
 			if kind == kindLeaf {
-				if validate {
-					if b.states[i].txid != 0 {
-						panic("invalid state")
-					}
-					b.states[i].txid = tx.id
-				}
 				break
 			}
-			if validate {
-				if kind == kindLeafSplit {
-					panic("invalid state")
-				}
-			}
-			b.states[i].lock.Unlock()
+			b.states[i].unlock(tx.write)
 		}
 	}
 }
 
-func (b *branchNode[T]) unlock(bounds rect, tx *Tx[T], validate bool) {
+func (b *branchNode[T]) unlock(bounds rect, tx *Tx[T]) {
 	quads := calcQuads(bounds)
 	for i := range 4 {
 		var ok bool
-		if tx.withonerect {
-			if rectIntersects(tx.onerect, quads[i]) {
+		for j := range len(tx.rects) {
+			if rectIntersects(tx.rects[j], quads[i]) {
 				ok = true
-			}
-		} else {
-			for j := range len(tx.rects0) {
-				if rectIntersects(tx.rects0[j], quads[i]) {
-					ok = true
-					break
-				}
+				break
 			}
 		}
 		if !ok {
@@ -333,23 +283,15 @@ func (b *branchNode[T]) unlock(bounds rect, tx *Tx[T], validate bool) {
 		}
 		kind := b.states[i].kind.Load()
 		if kind == kindBranch {
-			(*branchNode[T])(b.nodes[i]).unlock(quads[i], tx, validate)
+			(*branchNode[T])(b.nodes[i]).unlock(quads[i], tx)
 			continue
-		}
-		if validate {
-			if b.states[i].txid != tx.id {
-				panic("invalid state")
-			}
 		}
 		if kind == kindLeafSplit {
 			// Leaf was converted to branch due to a split.
 			// Switch to a branch before unlocking
 			b.states[i].kind.Store(kindBranch)
 		}
-		if validate {
-			b.states[i].txid = 0
-		}
-		b.states[i].lock.Unlock()
+		b.states[i].unlock(tx.write)
 	}
 }
 
@@ -374,7 +316,7 @@ func (s *Map[T]) insertAfterSplit(b *branchNode[T], bounds rect,
 }
 
 func (s *Map[T]) insert(b *branchNode[T], bounds rect, item item[T],
-	depth int, split bool, txid uint64, validate bool,
+	depth int, split bool,
 ) {
 	quads := calcQuads(bounds)
 	for i := range 4 {
@@ -385,27 +327,11 @@ func (s *Map[T]) insert(b *branchNode[T], bounds rect, item item[T],
 		if kind == kindBranch || kind == kindLeafSplit {
 			var split2 bool
 			if kind == kindLeafSplit {
-				if validate {
-					if b.states[i].txid != txid {
-						panic("invalid state")
-					}
-					if b.states[i].lock.TryLock() {
-						panic("invalid state")
-					}
-				}
 				split2 = true
 			}
 			child := (*branchNode[T])(b.nodes[i])
-			s.insert(child, quads[i], item, depth+1, split2, txid, validate)
+			s.insert(child, quads[i], item, depth+1, split2)
 		} else {
-			if validate {
-				if b.states[i].txid != txid {
-					panic("invalid state")
-				}
-				if b.states[i].lock.TryLock() {
-					panic("invalid state")
-				}
-			}
 			leaf := (*leafNode[T])(b.nodes[i])
 			if leaf == nil {
 				leaf = new(leafNode[T])
@@ -423,9 +349,7 @@ func (s *Map[T]) insert(b *branchNode[T], bounds rect, item item[T],
 	}
 }
 
-func (s *Map[T]) delete(b *branchNode[T], bounds rect, item item[T],
-	txid uint64, validate bool,
-) {
+func (s *Map[T]) delete(b *branchNode[T], bounds rect, item item[T]) {
 	var empty T
 	quads := calcQuads(bounds)
 	for i := range 4 {
@@ -434,27 +358,9 @@ func (s *Map[T]) delete(b *branchNode[T], bounds rect, item item[T],
 		}
 		kind := b.states[i].kind.Load()
 		if kind == kindBranch || kind == kindLeafSplit {
-			if kind == kindLeafSplit {
-				if validate {
-					if b.states[i].txid != txid {
-						panic("invalid state")
-					}
-					if b.states[i].lock.TryLock() {
-						panic("invalid state")
-					}
-				}
-			}
 			child := (*branchNode[T])(b.nodes[i])
-			s.delete(child, quads[i], item, txid, validate)
+			s.delete(child, quads[i], item)
 		} else {
-			if validate {
-				if b.states[i].txid != txid {
-					panic("invalid state")
-				}
-				if b.states[i].lock.TryLock() {
-					panic("invalid state")
-				}
-			}
 			leaf := (*leafNode[T])(b.nodes[i])
 			if leaf == nil {
 				continue
@@ -475,7 +381,7 @@ func (s *Map[T]) delete(b *branchNode[T], bounds rect, item item[T],
 }
 
 func (b *branchNode[T]) search(bounds, rect rect,
-	iter func(rect [4]float64, data T) bool, txid uint64, validate bool,
+	iter func(rect [4]float64, data T) bool,
 ) bool {
 	quads := calcQuads(bounds)
 	for i := range 4 {
@@ -484,29 +390,11 @@ func (b *branchNode[T]) search(bounds, rect rect,
 		}
 		kind := b.states[i].kind.Load()
 		if kind == kindBranch || kind == kindLeafSplit {
-			if kind == kindLeafSplit {
-				if validate {
-					if b.states[i].txid != txid {
-						panic("invalid state")
-					}
-					if b.states[i].lock.TryLock() {
-						panic("invalid state")
-					}
-				}
-			}
 			child := (*branchNode[T])(b.nodes[i])
-			if !child.search(quads[i], rect, iter, txid, validate) {
+			if !child.search(quads[i], rect, iter) {
 				return false
 			}
 		} else {
-			if validate {
-				if b.states[i].txid != txid {
-					panic("invalid state")
-				}
-				if b.states[i].lock.TryLock() {
-					panic("invalid state")
-				}
-			}
 			leaf := (*leafNode[T])(b.nodes[i])
 			if leaf == nil {
 				continue
@@ -532,21 +420,11 @@ func rect4(r [4]float64) rect {
 	return rect{point{r[0], r[1]}, point{r[2], r[3]}}
 }
 
-var txidc atomic.Uint64
-
-func (m *Map[T]) Begin(rects ...[4]float64) Tx[T] {
-	tx := Tx[T]{m: m}
-	if m.validate {
-		tx.id = txidc.Add(1)
-	}
-	if len(rects) == 1 {
-		tx.withonerect = true
-		tx.onerect = rect4(rects[0])
-	} else {
-		tx.rects0 = *(*[]rect)(unsafe.Pointer(&rects))
-	}
-	tx.m.oob.lock(bounds, &tx, m.validate)
-	tx.m.root.lock(bounds, &tx, m.validate)
+func (m *Map[T]) Begin(write bool, rects ...[4]float64) Tx[T] {
+	tx := Tx[T]{m: m, write: write}
+	tx.rects = *(*[]rect)(unsafe.Pointer(&rects))
+	tx.m.oob.lock(bounds, &tx)
+	tx.m.root.lock(bounds, &tx)
 	return tx
 }
 
@@ -554,8 +432,8 @@ func (tx *Tx[T]) End() error {
 	if tx.ended {
 		return ErrTxEnded
 	}
-	tx.m.oob.unlock(bounds, tx, tx.m.validate)
-	tx.m.root.unlock(bounds, tx, tx.m.validate)
+	tx.m.oob.unlock(bounds, tx)
+	tx.m.root.unlock(bounds, tx)
 	tx.ended = true
 	return nil
 }
@@ -565,16 +443,10 @@ func (tx *Tx[T]) validate(rect rect) error {
 		return ErrTxEnded
 	}
 	var ok bool
-	if tx.withonerect {
-		if rectContains(tx.onerect, rect) {
+	for i := range tx.rects {
+		if rectContains(tx.rects[i], rect) {
 			ok = true
-		}
-	} else {
-		for i := range tx.rects0 {
-			if rectContains(tx.rects0[i], rect) {
-				ok = true
-				break
-			}
+			break
 		}
 	}
 	if !ok {
@@ -588,8 +460,11 @@ func (tx *Tx[T]) Insert(rect [4]float64, data T) error {
 	if err := tx.validate(item.rect); err != nil {
 		return err
 	}
-	tx.m.oob.insert(bounds, item, tx.id, tx.m.validate)
-	tx.m.insert(&tx.m.root, bounds, item, 0, false, tx.id, tx.m.validate)
+	if !tx.write {
+		return ErrNotWritable
+	}
+	tx.m.oob.insert(bounds, item)
+	tx.m.insert(&tx.m.root, bounds, item, 0, false)
 	return nil
 }
 
@@ -598,8 +473,11 @@ func (tx *Tx[T]) Delete(rect [4]float64, data T) error {
 	if err := tx.validate(item.rect); err != nil {
 		return err
 	}
-	tx.m.oob.delete(bounds, item, tx.id, tx.m.validate)
-	tx.m.delete(&tx.m.root, bounds, item, tx.id, tx.m.validate)
+	if !tx.write {
+		return ErrNotWritable
+	}
+	tx.m.oob.delete(bounds, item)
+	tx.m.delete(&tx.m.root, bounds, item)
 	return nil
 }
 
@@ -610,8 +488,8 @@ func (tx *Tx[T]) Search(rect [4]float64,
 	if err := tx.validate(r); err != nil {
 		return err
 	}
-	if tx.m.oob.search(bounds, r, iter, tx.id, tx.m.validate) {
-		tx.m.root.search(bounds, r, iter, tx.id, tx.m.validate)
+	if tx.m.oob.search(bounds, r, iter) {
+		tx.m.root.search(bounds, r, iter)
 	}
 	return nil
 }
@@ -636,21 +514,14 @@ func (m *Map[T]) Clone() *Map[T] {
 	return m2
 }
 
-func (b *branchNode[T]) scan(iter func(rect [4]float64, data T) bool,
-	validate bool,
-) bool {
+func (b *branchNode[T]) scan(iter func(rect [4]float64, data T) bool) bool {
 	for i := range b.nodes {
 		kind := b.states[i].kind.Load() & 3
 		if kind == kindBranch {
-			if !(*branchNode[T])(b.nodes[i]).scan(iter, validate) {
+			if !(*branchNode[T])(b.nodes[i]).scan(iter) {
 				return false
 			}
 		} else {
-			if validate {
-				if kind != kindLeaf {
-					panic("invalid state")
-				}
-			}
 			leaf := (*leafNode[T])(b.nodes[i])
 			if leaf != nil {
 				for _, item := range leaf.items {
@@ -674,7 +545,7 @@ func (b *branchNode[T]) scan(iter func(rect [4]float64, data T) bool,
 // It's your responsibility to manage access using a lock, such as with a
 // sync.RWLock.
 func (m *Map[T]) Scan(iter func(rect [4]float64, data T) bool) {
-	if m.root.scan(iter, m.validate) {
+	if m.root.scan(iter) {
 		for _, item := range m.oob.items {
 			r := [4]float64{
 				item.rect.min.x, item.rect.min.y,
