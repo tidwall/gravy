@@ -5,7 +5,7 @@
 Vertically scalable spatial map for rapidly changing location data.
 
 - Designed for high concurrency and low contention
-- Uses a 2PL type locking mechanism
+- Uses a (C)2PL type locking mechanism
 - Works with rectangles, similar to an rtree
 - Uses a quadtree type structure under the hood
 - O(1) Copy-on-write method
